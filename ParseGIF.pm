@@ -15,6 +15,7 @@ package Image::ParseGIF;
 # 2000/05/15	0.10	A number of significant, embarrasing, fixes. Thanks 
 #						to Doug	Bagley for letting me know.
 #						- also added the deanimate method.
+# 2000/05/15	0.11	Fixed typo in print_parts
 #
 ######################################################################
 # 
@@ -32,7 +33,7 @@ use Exporter ();
 Exporter::export_tags();
 Exporter::export_ok_tags();
 
-$VERSION = 0.10;
+$VERSION = 0.11;
 
 use Fcntl qw(:DEFAULT :flock);  # sysopen, flock symbolic constants
 
@@ -560,7 +561,7 @@ sub print_parts
 	warn "printing parts $ppart - $part to $io\n" if ($self->{'debug'} > 1);
 	while ($ppart <= $part)
 	{
-		$io->print($self->{'parts'}->[$part++]);
+		$io->print($self->{'parts'}->[$ppart++]);
 	}
 	$self->{'_ppart'} = $ppart;
 }
