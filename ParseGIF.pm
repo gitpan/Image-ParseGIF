@@ -10,7 +10,8 @@ package Image::ParseGIF;
 ######################################################################
 # 
 # Change Log
-# 1999/08/30	0.10	First release. BDL
+# 1999/08/30	0.01	First release. BDL
+# 1999/09/01	0.02	Fixed image version test. BDL
 #
 ######################################################################
 # 
@@ -28,7 +29,7 @@ use Exporter ();
 Exporter::export_tags();
 Exporter::export_ok_tags();
 
-$VERSION = 0.01;
+$VERSION = 0.02;
 
 use Fcntl qw(:DEFAULT :flock);  # sysopen, flock symbolic constants
 
@@ -132,9 +133,9 @@ sub _wrap
 	my ($io, $mode) = @_;
 	$mode = (($io =~ /\Q*main::STD\E(OUT|ERR)/) ? 'w' : 'r') unless $mode;
 
-    # convert raw scalar to globref, leave globrefs as they are
+	# convert raw scalar to globref, leave globrefs as they are
 	no strict 'refs';
-    $io = \*$io unless (ref($io) or ref(\$io) eq 'GLOB');
+	$io = \*$io unless (ref($io) or ref(\$io) eq 'GLOB');
 	use strict;
 
 	unless ($io->isa("IO::Handle"))	# dup a filehandle to an IO::Handle
@@ -176,7 +177,7 @@ sub _read_header
 
 	unless ($self->{'header'} =~ /^GIF(\d\d)([a-z])/)
 	{
-		$@ = "not a gif";
+		$@ = "not a GIF - signature is [$self->{'header'}]";
 		return undef;
 	}
 
@@ -184,9 +185,12 @@ sub _read_header
 	my @img_ver = ($1, $2);
 
 	# check the image version (note numbering = 87,88,...99, 00, 01, ..., 86)
-	$img_ver[0] += 100 if ($img_ver[0] < 87);
-	$@ = "GIF version [@img_ver] greater than [@spec_ver]" 
-        	if ($img_ver[0] > $spec_ver[0] and $img_ver[1] > $spec_ver[1]);
+	{
+	local $"='';
+	warn "GIF version [@img_ver] greater than [@spec_ver]\n" 
+		if (($img_ver[0] < 87 ? $img_ver[0] + 100 : $img_ver[0]) > $spec_ver[0] 
+		   or ($img_ver[0] == $spec_ver[0] and $img_ver[1] gt $spec_ver[1]));
+	}
 
 	# get logical screen description test for global colour table
 	_read($io, $b, 7);
@@ -221,7 +225,7 @@ sub _read_image_descriptor
 	# 	$lpos, $tpos, $w, $h, $flags);
 	# }
 
-    my ($flags) = unpack("x8 C", $b);
+	my ($flags) = unpack("x8 C", $b);
 	if ($flags & 0x80)	# local colour map?
 	{
 		warn "\treading local colour table [" . 
