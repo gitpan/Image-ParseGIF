@@ -10,8 +10,11 @@ package Image::ParseGIF;
 ######################################################################
 # 
 # Change Log
-# 1999/08/30	0.01	First release. BDL
-# 1999/09/01	0.02	Fixed image version test. BDL
+# 1999/08/30	0.01	First release.
+# 1999/09/01	0.02	Fixed image version test. 
+# 2000/05/15	0.10	A number of significant, embarrasing, fixes. Thanks 
+#						to Doug	Bagley for letting me know.
+#						- also added the deanimate method.
 #
 ######################################################################
 # 
@@ -29,7 +32,7 @@ use Exporter ();
 Exporter::export_tags();
 Exporter::export_ok_tags();
 
-$VERSION = 0.02;
+$VERSION = 0.10;
 
 use Fcntl qw(:DEFAULT :flock);  # sysopen, flock symbolic constants
 
@@ -53,6 +56,8 @@ sub new
 		header	=> '',		# GIF header, screen desc, colour table
 		parts	=> [],		# (image, control) parts
 		trailer	=> '',		# trailer
+
+		delay	=> 0,		# default delay between frames
 
 		debug	=> 0,		# debug state
 		output	=> undef,	# IO::Handle to send output to
@@ -84,23 +89,26 @@ sub debug
 sub _read
 # read and confirm I got what I asked for
 #  - read $len and write into buffer at $offset
-#    - appends to end of buffer if offset == -1
+#    - if offset < 0, writes to (end of buffer + offset + 1) (this is different 
+#      to perl's inbuilt read, which writes at end + offset, i.e. overwrites
+#      last 'offset' bytes)
 #  - returns false on error
 # e.g.
-#  _read($fh, $buf, 1);		# read 1 byte at offset 0
-#  _read($fh, $buf, 1, 5);	# read 1 byte at offset 5
-#  _read($fh, $buf, 1, -1);	# read 1 byte at offset (len($buf) + 'offset' + 1)
+#  _read($fh, $buf, 1);		# read 1 byte into offset 0
+#  _read($fh, $buf, 1, 5);	# read 1 byte into offset 5
+#  _read($fh, $buf, 1, -1);	# read 1 byte into offset (len($buf) + 'offset' + 1)
 #
 {
 	my ($io, $buf, $len, $offset) = @_;
 
-	$offset ||= 0;	# 0, if not defined
-	$offset += length($buf || '') + 1 if ($offset < 0);
+	$offset ||= 0;	# 0, if not defined or ''
+	$offset += ($buf ? length($buf) + 1 : 1) if $offset < 0;
 	$offset = 0 if ($offset < 0);
 
 	my $r = $io->read($_[1], $len, $offset);
 
-	unless (defined($r)) { $@ = "read error: $!"; return undef; }
+	$@ = "read error: $!", return undef unless (defined($r));
+
 	# eof is ok
 	$@ = "short read: $r / $len" unless ($r == 0 or $r == $len);
 
@@ -110,18 +118,17 @@ sub _read
 sub open
 # open a gif and parse it
 {
+	use IO::File;
+
 	my ($self, $filename) = @_;
 
-	unless (sysopen(IMAGE, $filename, O_RDONLY))
-	{
-		$@ = $!;
-		return undef;
-	}
+	my $io = new IO::File ($filename, O_RDONLY);
 
-	my $r = $self->parse(*IMAGE);
+	unless (defined $io)
+		{ $@ = $!; warn "$@\n" if $self->{'debug'}; return undef }
 
-	close(IMAGE);
-
+	my $r = $self->parse($io);
+	$io->close();
 	return $r;
 }
 
@@ -131,23 +138,18 @@ sub _wrap
 # wrap a filehandle (a la IO::Wrap, but use IO::Handle instead of FileHandle)
 {
 	my ($io, $mode) = @_;
-	$mode = (($io =~ /\Q*main::STD\E(OUT|ERR)/) ? 'w' : 'r') unless $mode;
 
-	# convert raw scalar to globref, leave globrefs as they are
-	no strict 'refs';
-	$io = \*$io unless (ref($io) or ref(\$io) eq 'GLOB');
-	use strict;
-
-	unless ($io->isa("IO::Handle"))	# dup a filehandle to an IO::Handle
+	unless (UNIVERSAL::can($io, 'read'))
 	{
 		my $fh = $io;
 		$io = new IO::Handle;
 		# fdopen() the filehandle directly (i.e. dup the filehandle), rather 
-		# than fileno($fh). Using the fileno will cause the (original) file 
-		# to be closed when the IO object is destroyed.
+		# than taking fileno($fh). Using the fileno directly will cause the 
+		# original file to be closed when the IO object is destroyed.
 		unless ($io->fdopen($fh, $mode))
 		{
 			$@ = "could not open IO::Handle on [$fh]: $!";
+			warn "$@\n";
 			return undef;
 		}
 
@@ -172,12 +174,15 @@ sub _read_header
 	my $b;		# used to buffer 'headers' which need to be unpacked
 	my $flags;	# used for flag bitmaps
 
+	warn "reading header\n" if $self->{'debug'};
+
 	# get the GIF 'signature' (e.g. 'GIF89a')
 	_read($io, $self->{'header'}, 6, 0);
 
 	unless ($self->{'header'} =~ /^GIF(\d\d)([a-z])/)
 	{
 		$@ = "not a GIF - signature is [$self->{'header'}]";
+		warn "$@\n" if $self->{'debug'};
 		return undef;
 	}
 
@@ -187,12 +192,12 @@ sub _read_header
 	# check the image version (note numbering = 87,88,...99, 00, 01, ..., 86)
 	{
 	local $"='';
-	warn "GIF version [@img_ver] greater than [@spec_ver]\n" 
+	warn "\tGIF version [@img_ver] greater than [@spec_ver]\n" 
 		if (($img_ver[0] < 87 ? $img_ver[0] + 100 : $img_ver[0]) > $spec_ver[0] 
 		   or ($img_ver[0] == $spec_ver[0] and $img_ver[1] gt $spec_ver[1]));
 	}
 
-	# get logical screen description test for global colour table
+	# get logical screen description and test for presence of colour table
 	_read($io, $b, 7);
 	$self->{'header'} .= $b;
 
@@ -200,45 +205,67 @@ sub _read_header
 
 	if ($flags & 0x80)	# get global color table if present
 	{
-		warn "reading global colour table [" . 
-				sprintf ("%d", (3 * 2**(($flags & 0x07) + 1))) . 
+		warn "\treading global colour table [" . 
+				sprintf ('%d', 3 * (1<<(($flags & 0x07) + 1))) . 
 				" bytes]\n" if $self->{'debug'};
-		_read($io, $self->{'header'}, 3 * 2**(($flags & 0x07) + 1), -1);
+		_read($io, $self->{'header'}, 3 * (1<<(($flags & 0x07) + 1)), -1);
 	}
 
 	return 1;
 }
 
 sub _read_image_descriptor
+# read an image descriptor and add to current part
 {
-	my ($self, $io, $part) = @_;
-	my $b;		# used to buffer 'headers' which need to be unpacked
+	my ($self, $io, $part, $b) = @_;
+	# $b - used to buffer 'headers' which need to be unpacked
+	# - should contain the 'image separator' byte (0x2c) to start
 
-	warn "reading image descriptor\n" if $self->{'debug'};
+	warn "reading image descriptor (-> part $part)\n" if $self->{'debug'};
 
-	_read($io, $b, 9);
+	unless (ord($b) == 0x2c)
+	{
+		$@ = "not an image separator [$b]";
+		warn "$@\n" if $self->{'debug'};
+		return undef;
+	}
+
+	# append separator to current part
 	$self->{'parts'}[$part] .= $b;
 
-	# {
-	# my ($lpos, $tpos, $w, $h, $flags) = unpack("v v v v C", $b);
-	# warn sprintf("[%d %d %d %d 0x%.2x]\n", 
-	# 	$lpos, $tpos, $w, $h, $flags);
-	# }
+	# read descriptor
+	_read($io, $b, 9);
+
+	# append descriptor to current part
+	$self->{'parts'}[$part] .= $b;
+
+	if ($self->{'debug'} > 1)
+	{
+		# write (width x height) @ (top, left) (flags)
+		my ($l, $t, $w, $h, $flags) = unpack("v v v v C", $b);
+		my @f;
+		push (@f, 'LOCAL_COLOUR_TABLE') 	if ($flags & 0x80);
+		push (@f, 'INTERLACED')				if ($flags & 0x40);
+		push (@f, 'SORTED_COLOUR_TABLE')	if ($flags & 0x20);
+		push (@f, sprintf 'RESERVED(0x%x)', ($flags & 0x18)>>3)
+			if ($flags & 0x18);
+		warn sprintf("\t%dx%d@%d,%d (0x%.2x = %s)\n", $w, $h, $l, $t, 
+			$flags, join('|', @f) || '-');
+	}
 
 	my ($flags) = unpack("x8 C", $b);
 	if ($flags & 0x80)	# local colour map?
 	{
 		warn "\treading local colour table [" . 
-			sprintf ("0x%x", (3 * 2**(($flags & 0x07) + 1))) . 
+			sprintf ("%3d", 3 * (1<<(($flags & 0x07) + 1))) . 
 			" bytes]\n" if $self->{'debug'};
 		_read($io, $self->{'parts'}[$part], 
-			3 * 2**(($flags & 0x07) + 1), -1);
+			3 * (1<<(($flags & 0x07) + 1)), -1);
 	}
-	#if ($flags & 0x60) { warn "\timage is interlaced\n";}
 
 	# get 'LZW code size' parameter
 	warn "\treading LZW code size\n" if $self->{'debug'};
-	_read($io, $self->{'parts'}[$part], 1, -1);
+	_read($io, $self->{'parts'}[$part], 1, -1);	# read 1 byte -> append to part
 
 	# and now the sub-block/s
 	_read($io, $b, 1);	# get block length
@@ -246,7 +273,7 @@ sub _read_image_descriptor
 	while (ord($b) > 0)
 	{
 		warn "\t reading sub-block [" , ord($b), " bytes]\n" if 
-			$self->{'debug'};
+			$self->{'debug'} > 1;
 		_read($io, $self->{'parts'}[$part], ord($b), -1);
 		# get either the block terminator (0x00) (ie. no more blocks), 
 		#  or the block size of the next block
@@ -259,14 +286,24 @@ sub _read_image_descriptor
 }
 
 sub _read_extension
+# read an extension, but only and add to current part if it is a graphic 
+# control
 {
-	my ($self, $io, $part) = @_;
-	my $b;		# used to buffer 'headers' which need to be unpacked
+	my ($self, $io, $part, $b) = @_;
+	# $b - used to buffer 'headers' which need to be unpacked
+	# - should contain the 'extension introducer' byte (0x21) to start
 
-	warn "reading extension\n" if $self->{'debug'};
+	warn "reading extension (-> part $part)\n" if $self->{'debug'};
 
-	_read($io, $b, 1);	# what kind of extension?
-	$self->{'parts'}[$part] .= $b;
+	unless (ord($b) == 0x21)
+	{
+		$@ = "not an extension [$b]";
+		warn "$@\n" if $self->{'debug'};
+		return undef;
+	}
+
+	# read extension type
+	_read($io, $b, 1);
 
 	my $t = ord($b);
 
@@ -275,56 +312,90 @@ sub _read_extension
 		# graphic control precedes an image decriptor
 		warn "\tgraphic control\n" if $self->{'debug'};
 
-		_read($io, $b, 6);	# get the 'header'
+		# ok, want this extension so add introducer and type to current part
+		$self->{'parts'}[$part] .= pack('C2', 0x21, 0xf9);
 
-		# zero any delay
-		my ($bs, $flags, $delay, $tci, $bt) = unpack("C C v C C", $b);
+		_read($io, $b, 6);	# get the gc 'header'
 
-		$b = pack("C C v C C", $bs, $flags, 0, $tci, $bt);
+		if ($self->{'debug'} > 1)
+		{
+			# write delay, transparent index, (flags)
+			my ($s, $flags, $d, $i) = unpack("C C v C", $b);
+			warn "\tERROR: invalid size (got $s, expected 4\n" if $s != 4;
+			my @f;
+			push (@f, sprintf 'RESERVED(0x%x)', ($flags & 0xe0)>>5)
+				if ($flags & 0xe0);
+			push (@f, sprintf 'DISPOSAL_METHOD(%d)', ($flags & 0x1c)>>2)
+				if ($flags & 0x1c);
+			push (@f, 'USER_INPUT')			if ($flags & 0x02);
+			push (@f, "TRANSPARENT($i)")	if ($flags & 0x01);
+			warn sprintf("\t[dt=%dms (0x%.2x = %s)]\n", $d*10,
+				$flags, join('|', @f) || '-');
+		}
+
+		# update delay
+		my ($s, $flags, $delay, $tci, $bt) = unpack("C C v C C", $b);
+
+		$b = pack("C C v C C", $s, $flags, $self->{'delay'}, $tci, $bt);
 		$self->{'parts'}[$part] .= $b;
 	}
-	elsif ($t == 0x01)	# plain text
+	elsif ($t == 0x01)	# plain text - skip
 	{
-		warn "\tplain text\n" if $self->{'debug'};
+		warn "\tplain text (skipping)\n" if $self->{'debug'};
 		_read($io, $b, 13);	# 'header'
-		_read($io, $b, 1);	# block length
+		_read($io, $b, 1);	# block length, or terminator (==0)
 		while (ord($b) > 0)
 		{
 			warn "\t skipping sub-block [" , ord($b), " bytes]\n" if 
-				$self->{'debug'};
+				$self->{'debug'} > 1;
 			_read($io, $b, ord($b));
-			_read($io, $b, 1);	# next block length
+			# filter as per the GIF Plain Text Extension Recommendation,
+			# - except use ? rather than space
+			$b =~ s/[\x00-\x1f\x7f-\xff]/?/sg;
+			warn "\t[$b]\n" if $self->{'debug'} > 1;
+			_read($io, $b, 1);	# block length, or terminator (==0)
 		}
 	}
 	elsif ($t == 0xff)	# application extension - skip
 	{
-		warn "\tapplication extension\n" if $self->{'debug'};
+		warn "\tapplication extension (skipping)\n" if $self->{'debug'};
 		_read($io, $b, 12);	# 'header'
-		_read($io, $b, 1);	# block length
+		if ($self->{'debug'} > 1)
+		{
+			my ($s, $id, @c) = unpack ('C a8 C3', $b);
+			warn "\tERROR: invalid size (got $s, expected 11\n" if $s != 11;
+			$id =~ s/[\x00-\x1f\x7f-\xff]/?/sg;	# filter non-printable chars
+			warn "\t[$id, " . sprintf ('0x%x%x%x', @c) . "]\n";
+		}
+		_read($io, $b, 1);	# block length, or terminator (==0)
 		while (ord($b) > 0)
 		{
 			warn "\t skipping sub-block [" , ord($b), " bytes]\n" if 
-				$self->{'debug'};
+				$self->{'debug'} > 1;
 			_read($io, $b, ord($b));
-			_read($io, $b, 1);	# next block length
+			_read($io, $b, 1);	# block length, or terminator (==0)
 		}
 	}
-	elsif ($t == 0xfe)	# comment
+	elsif ($t == 0xfe)	# comment - skip
 	{
-		warn "\tcomment\n" if $self->{'debug'};
+		warn "\tcomment (skipping)\n" if $self->{'debug'};
 		# no 'header'
-		_read($io, $b, 1);	# how long is the block?
+
+		_read($io, $b, 1);	# block length, or terminator (==0)
 		while (ord($b) > 0)
 		{
 			warn "\t skipping sub-block [" , ord($b), " bytes]\n" if 
-				$self->{'debug'};
+				$self->{'debug'} > 1;
 			_read($io, $b, ord($b));
-			_read($io, $b, 1);	# how long is the next block?
+			$b =~ s/[\x00-\x1f\x7f-\xff]/?/sg;	# filter non-printable chars
+			warn "\t[$b]\n" if $self->{'debug'} > 1;
+			_read($io, $b, 1);	# block length, or terminator (==0)
 		}
 	}
 	else
 	{
 		$@ = "invalid extension label found";
+		warn "$@\n" if $self->{'debug'};
 		return undef;
 	}
 
@@ -337,7 +408,7 @@ sub parse
 	my ($self, $io) = @_;
 	my $b;		# used to buffer 'headers' which need to be unpacked
 
-	unless (_wrap($io))
+	unless (_wrap($io, 'r'))
 	{
 		$@ ||= "could not wrap [$io]";
 		return undef;
@@ -346,39 +417,51 @@ sub parse
 	# read header, aborting if it doesn't look like a GIF
 	_read_header($self, $io) or return undef;
 
-	# parse the parts
-	my $part = scalar(@{$self->{'parts'}});
+	# parse the parts, adding to any existing parts
+	my $part = @{$self->{'parts'}};
 	my $t;		# block type
+
+	my $fp;		# file position (for debugging)
+	warn "fpos=" . ($fp = tell($io)) . "\n" if $self->{'debug'} > 2;
 
 	while (_read($io, $b, 1))
 	{
+		my $p = $part;	# used in debugging, below
+
 		$t = ord($b);
 
 		if ($t == 0x3b)		# trailer
 		{
+			warn "reading trailer\n" if $self->{'debug'};
 			$self->{'trailer'} = $b;
-			$@ = "invalid trailer" unless (ord($self->{'trailer'}) == 0x3b);
-			next;
 		}
 
-		$self->{'parts'}[$part] .= $b;
-
-		if ($t == 0x2c)		# image descriptor
+		elsif ($t == 0x2c)		# image descriptor
 		{
-			_read_image_descriptor($self, $io, $part);
+			_read_image_descriptor($self, $io, $part, $b);
 			$part++;	# start the next part
-			next;
 		}
 
-		if ($t == 0x21)		# some kind of extension
+		elsif ($t == 0x21)		# some kind of extension
 		{
-			_read_extension($self, $io, $part);
-			next;
+			_read_extension($self, $io, $part, $b);
 		}
 
-		# fall-through
-		$@ = "invalid block label found";
-		return undef;
+		else
+		{
+			# fall-through
+			$@ = "invalid block label found [$t]";
+			warn "$@\n" if $self->{'debug'};
+			return undef;
+		}
+
+		if ($self->{'debug'} > 2)
+		{
+			$_ = tell($io);
+			warn "fpos=$_ (+" . ($_ - $fp) . ") partlen=" . 
+				length($self->{'parts'}[$p]||'') . "\n";
+			$fp = $_;
+		}
 	}
 
 	return 1;
@@ -399,21 +482,25 @@ sub trailer
 
 sub parts
 # Return list of the image parts in array context, or number of parts in 
-# scalar context.
+# scalar context. (Does not include header or trailer).
 {
 	return wantarray ? @{shift->{'parts'}} : scalar(@{shift->{'parts'}});
 }
 
 sub part
-# Return scalar ref to an image part
+# Return an image part
 #  - part == undef gives header
 #  - part > num_parts gives trailer
 {
 	my ($self, $part) = @_;
 
-	return \$self->{'header'} unless defined($part);
-	return \$self->{'trailer'} if ($part > $#{$self->{'parts'}});
-	return \$self->{'parts'}->[$part];
+	warn "returning part [" . (defined($part) ? 
+		($part > $#{$self->{'parts'}} ? 'trailer' : $part) : 'header') . 
+		"]\n" if ($self->{'debug'} > 1);
+
+	return $self->{'header'} unless defined($part);
+	return $self->{'trailer'} if ($part > $#{$self->{'parts'}});
+	return $self->{'parts'}->[$part];
 }
 
 sub output
@@ -423,7 +510,12 @@ sub output
 
 	$io = *STDOUT unless defined($io);
 	warn "output to $io\n" if ($self->{'debug'} > 1);
-	_wrap($io);
+	unless (_wrap($io, 'w'))
+	{
+		$@ ||= "could not wrap [$io]";
+		return undef;
+	}
+	warn "\t-> $io\n" if ($self->{'debug'} > 1);
 
 	$self->{'output'} = $io;
 }
@@ -433,13 +525,26 @@ sub print_part
 {
 	my ($self, $part, $io) = @_;
 
-	# sort out the parameter order: ($io), ($part, $io) or ($io, $part)
-	if (ref(\$part) eq 'GLOB') { ($io, $part) = ($part, $io) }
+	$io = defined($io) ? _wrap($io, 'w') : $self->{'output'};
 
-	$io = defined($io) ? _wrap($io) : $self->{'output'};
+	warn "printing part " . (defined $part ? $part : '-') . " to $io\n" 
+		if $self->{'debug'} > 1;
 
-	warn "printing part $part to $io\n" if ($self->{'debug'} > 1);
-	$io->print(${$self->part($part)});
+	$io->print($self->{'parts'}->[$part]);
+}
+
+sub deanimate
+# print header, given part and trailer to given / default fh
+{
+	my ($self, $part, $io) = @_;
+
+	$io = defined($io) ? _wrap($io, 'w') : $self->{'output'};
+
+	$part ||= 0;
+
+	$io->print($self->{'header'});
+	$io->print($self->{'parts'}->[$part]);
+	$io->print($self->{'trailer'});
 }
 
 sub print_parts
@@ -447,17 +552,15 @@ sub print_parts
 {
 	my ($self, $part, $io) = @_;
 
-	# sort out the parameter order: ($part), ($io), ($part, $io) or ($io, $part)
-	if (ref(\$part) eq 'GLOB') { ($io, $part) = ($part, $io) }
-
-	$io = defined($io) ? _wrap($io) : $self->{'output'};
+	$io = defined($io) ? _wrap($io, 'w') : $self->{'output'};
+	$part = @{$self->{'parts'}} unless defined $part;
 
 	# where were we up to?
 	my $ppart = $self->{'_ppart'} || 0;
 	warn "printing parts $ppart - $part to $io\n" if ($self->{'debug'} > 1);
 	while ($ppart <= $part)
 	{
-		$io->print(${$self->part($ppart++)});
+		$io->print($self->{'parts'}->[$part++]);
 	}
 	$self->{'_ppart'} = $ppart;
 }
@@ -466,13 +569,14 @@ sub print_percent
 {
 	my ($self, $p, $io) = @_;
 	$p = 1 if $p > 1;
-	$self->print_parts(int($p * @{shift->{'parts'}} + 0.5));
+	$p = 0 if $p < 0;
+	$self->print_parts(int($p * @{$self->{'parts'}} + 0.5), $io);
 }
 
 sub print_header
 {
 	my ($self, $io) = @_;
-	$io = defined($io) ? _wrap($io) : $self->{'output'};
+	$io = defined($io) ? _wrap($io, 'w') : $self->{'output'};
 	warn "printing header to $io\n" if ($self->{'debug'} > 1);
 	$io->print($self->{'header'});
 }
@@ -480,7 +584,7 @@ sub print_header
 sub print_trailer
 {
 	my ($self, $io) = @_;
-	$io = defined($io) ? _wrap($io) : $self->{'output'};
+	$io = defined($io) ? _wrap($io, 'w') : $self->{'output'};
 	warn "printing trailer to $io\n" if ($self->{'debug'} > 1);
 	$io->print($self->{'trailer'});
 }
@@ -578,7 +682,8 @@ A gif image consists of:
 
 =item 1
 
-a 'header'
+a 'header' (including the GIF header (signature string) and logical screen 
+descriptor)
 
 =item 2 
 
@@ -606,6 +711,9 @@ one or more sub-blocks per part
 a trailer
 
 =back
+
+Note that this module groups the GIF header, logical screen descriptor and
+any global colour map into the 'header' part.
 
 There are two types of 'descriptor blocks/extensions' defined in the GIF
 specification [1]: an image descriptor; or an extension. Extensions can
@@ -661,17 +769,17 @@ Parse a GIF, reading from a given filehandle / IO::Handle.
 
 =item (header|trailer)
 
-Return the image (header|trailer) as a scalar.
+Returns the image (header|trailer) as a scalar.
 
 =item parts
 
-Return list of the image parts in array context, or number of parts in 
-scalar context.
+Returns a list of the image parts in array context, or the number of parts in 
+scalar context. Does not include header or trailer.
 
 =item part ( PART )
 
-Return a scalar reference to an image part. If PART == 0, returns header; if 
-PART > number of parts, returns trailer.
+Returns an image part as a scalar. If PART == undef, returns header; 
+if PART > number of parts, returns trailer.
 
 = item output ( IO )
 
@@ -688,13 +796,45 @@ Prints the given PART to the supplied / default output stream.
 
 =item print_parts ( [PART] [, IO] )
 
-Print multiple parts to the supplied / default output stream. Remembers 
-which part it was up to (PreviousPART), prints from from PreviousPART to PART.
+Remembers which part it was up to (PreviousPART), prints from from 
+PreviousPART to PART to the supplied / default output stream.
 
 =item print_percent ( PERCENT [, IO ] )
 
-Print PERCENT percent of the image frames. Remembers where it was up to, and 
+Prints PERCENT percent of the image frames. Remembers where it was up to, and 
 will only print increasing part numbers (i.e. it won't duplicate parts).
+
+=item deanimate ( [PART] [, IO ] )
+
+Prints header, given part (or part 0 if unspecified) and trailer to the 
+supplied / default output stream.
+
+=back
+
+
+=head1 NOTES
+
+You shpuld be able to parse an image contained in any object which has
+a read() method (e.g. IO::Scalar), however the object will have to support 
+the OFFSET read() argument. As at version 1.114, IO::Scalar does not.
+
+For example:
+  $io = new IO::File ('blah');
+  $gif = new Image::ParseGIF;
+  $gif->parse($io) or die "failed to parse: $@\n";
+
+
+=head1 "BUGS"
+
+=over
+
+=item 
+
+Could probably have a simpler implementation...
+
+=item 
+
+It'd be nice to have a more generic interface to handle all GIF extensions, etc.
 
 =back
 

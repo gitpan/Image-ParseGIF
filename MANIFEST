@@ -2,7 +2,8 @@ MANIFEST
 README
 Makefile.PL
 ParseGIF.pm
-example/README
-example/main.cgi
-example/status.cgi
-example/progressbar.gif
+examples/README
+examples/main.cgi
+examples/status.cgi
+examples/progressbar.gif
+examples/deanim.pl

@@ -1,5 +1,5 @@
 
-README for the Perl module Image::ParseGIF - 0.10
+README for the Perl module Image::ParseGIF
 
 	Copyright (c) 1999 University of New South Wales 
 	Benjamin Low <b.d.low@unsw.edu.au>. All rights reserved.
@@ -20,9 +20,14 @@ This module parses a Graphics Interchange Format (GIF) image into
 its component 'parts' (a GIF is essentially made up of one or more 
 images - multiple images typically are used for animated gifs).
 
-This module can be used by a WWW/CGI application to provide 'real-time'
+Why, oh why?
+
+- this module can be used by a WWW/CGI application to provide 'real-time'
 feedback to a client without using client-side scripts or undue network
 inefficiencies. An example application is provided.
+
+- animated GIFs can be de-animated by simply extracting one frame (typically
+the first or last).
 
 I'm sure other uses could be found...
 

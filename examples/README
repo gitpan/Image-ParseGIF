@@ -1,4 +1,8 @@
 
+
+Progress Bar Example
+--------------------
+
 Install main.cgi, status.cgi and the progressbar.gif into an appropriate 
 web server CGI-bin directory.
 
@@ -13,3 +17,9 @@ script URLs to work with your server.
 
 Incidentally, the progressbar.gif is under the same license as the 
 Image-ParseGIF module.
+
+Deanimation Example
+--------------------
+
+Run deanim.pl across any animated gifs to extract the first frame.
+
