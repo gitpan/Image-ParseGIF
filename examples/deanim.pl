@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# extracts the first frame of an animated gif
+# extracts a random frame of an animated gif
 
 use strict;
 
@@ -13,6 +13,6 @@ foreach my $f (@ARGV)
 	$f =~ s/\.gif$/_static.gif/;
 
 	$gif->output(IO::File->new(">$f")) or die "$!\n";
-	$gif->deanimate;
+	$gif->deanimate(-1);
 
 }

@@ -1,7 +1,7 @@
 
 README for the Perl module Image::ParseGIF
 
-	Copyright (c) 1999 University of New South Wales 
+	Copyright (c) 1999/2000 University of New South Wales 
 	Benjamin Low <b.d.low@unsw.edu.au>. All rights reserved.
 
 	This program is free software; you can redistribute it and/or
@@ -28,6 +28,9 @@ inefficiencies. An example application is provided.
 
 - animated GIFs can be de-animated by simply extracting one frame (typically
 the first or last).
+
+- thanks to the colour table filters contributed by Ed Halley, 
+'printer-friendly' (greyscale, deanimated) images can easily be generated.
 
 I'm sure other uses could be found...
 

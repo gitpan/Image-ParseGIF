@@ -3,7 +3,7 @@ package Image::ParseGIF;
 ######################################################################
 # 
 # Parse a GIF image into its component parts.
-#  (c) 1999 University of NSW
+#  (c) 1999/2000 University of NSW
 # 
 # Written by Benjamin Low <b.d.low@unsw.edu.au>
 #
@@ -12,10 +12,13 @@ package Image::ParseGIF;
 # Change Log
 # 1999/08/30	0.01	First release.
 # 1999/09/01	0.02	Fixed image version test. 
-# 2000/05/15	0.10	A number of significant, embarrasing, fixes. Thanks 
-#						to Doug	Bagley for letting me know.
+# 2000/05/15	0.10	Fixed a number of embarrasing problems (I was 
+#						mixing up the initial bytes of each part)... 
+#						Thanks to Doug Bagley for letting me know.
 #						- also added the deanimate method.
 # 2000/05/15	0.11	Fixed typo in print_parts
+# 2000/06/05	0.20	Colour table manipulations, written by Ed Halley
+#						- also added binmode to file i/o (also thanks to Ed)
 #
 ######################################################################
 # 
@@ -33,11 +36,12 @@ use Exporter ();
 Exporter::export_tags();
 Exporter::export_ok_tags();
 
-$VERSION = 0.11;
+$VERSION = 0.20;
 
 use Fcntl qw(:DEFAULT :flock);  # sysopen, flock symbolic constants
 
 use IO::Handle;
+# also use IO::File in ::open()
 
 sub new
 # create a new object
@@ -60,8 +64,14 @@ sub new
 
 		delay	=> 0,		# default delay between frames
 
+		# three new options added by Ed Halley [ed@explorati.com]
+		# - when set, these operations are applied to all colour table(s)
+		invert		=> 0,	# toggle colour table(s) inversion (light-for-dark)
+		posterize	=> 0,	# flatten colour table(s) (to N colours, 0 == off)
+		desaturate	=> 0,	# toggle desaturatation (grayscale)
+
 		debug	=> 0,		# debug state
-		output	=> undef,	# IO::Handle to send output to
+		output	=> undef,	# IO::Handle to send output to (STDOUT by default)
 	};
 
 	# merge arguments
@@ -70,12 +80,16 @@ sub new
 		$self->{lc($k)} = $v;
 	}
 
+	# allow the non-American spelling :-)
+	$self->{posterize} = delete $self->{posterise} 
+		if (exists $self->{posterise});
+
 	bless ($self, $class);
 
-	# set output filehandle (STDOUT by default)
+	# set output filehandle
 	$self->output($self->{'output'});
 
-	# open input file if given
+	# open input file if provided
 	if ($filename) { return $self = undef unless $self->open($filename); }
 
 	return $self;
@@ -85,6 +99,28 @@ sub debug
 {
 	my ($self, $l) = @_;
 	return defined($l) ? $self->{'debug'} = $l : $self->{'debug'};
+}
+
+# new options added by Ed Halley [ed@explorati.com]
+sub invert
+{
+	my ($self, $l) = @_;
+	return defined($l) ? $self->{'invert'} = $l : $self->{'invert'};
+}
+
+# new option added by Ed Halley [ed@explorati.com]
+sub posterize
+{
+	my ($self, $l) = @_;
+	return defined($l) ? $self->{'posterize'} = $l : $self->{'posterize'};
+}
+sub posterise { shift->posterize(@_) }
+
+# new option added by Ed Halley [ed@explorati.com]
+sub desaturate
+{
+	my ($self, $l) = @_;
+	return defined($l) ? $self->{'desaturate'} = $l : $self->{'desaturate'};
 }
 
 sub _read
@@ -128,6 +164,9 @@ sub open
 	unless (defined $io)
 		{ $@ = $!; warn "$@\n" if $self->{'debug'}; return undef }
 
+	# be nice to non-unix users
+	binmode($io);
+
 	my $r = $self->parse($io);
 	$io->close();
 	return $r;
@@ -145,7 +184,7 @@ sub _wrap
 		my $fh = $io;
 		$io = new IO::Handle;
 		# fdopen() the filehandle directly (i.e. dup the filehandle), rather 
-		# than taking fileno($fh). Using the fileno directly will cause the 
+		# than using fileno($fh). Using the fileno directly will cause the 
 		# original file to be closed when the IO object is destroyed.
 		unless ($io->fdopen($fh, $mode))
 		{
@@ -155,6 +194,9 @@ sub _wrap
 		}
 
 		$io->autoflush($_autoflush);
+
+		# be nice to non-unix users
+		binmode($io);
 	}
 
 	return $_[0] = $io;
@@ -167,6 +209,66 @@ sub autoflush
 {
 	my ($self, $v) = @_;
 	return $_autoflush = (defined($v) ? $v : 1);
+}
+
+sub _read_and_adjust_color_table
+# colour-table reading and adjusting made into function by Ed Halley [ed@explorati.com]
+# probably a lot of faster ways to do the transforms, but this is readable
+{
+	my ($self, $io, $flags) = @_;
+	my $nColors = (1<<(($flags & 0x07) + 1));
+	my $aColors = ' ' x (3*$nColors);
+
+	warn "\treading colour table " .
+		"[" . (3 * $nColors) . " bytes]\n" if $self->{'debug'};
+
+	_read($io, $aColors, 3 * $nColors);
+
+	my $i;
+	if ($self->{'invert'})
+	{
+		warn "\tinverting colour table\n" if $self->{'debug'};
+		for $i (0 .. ($nColors-1))
+		{
+			my ($r, $g, $b) = unpack("CCC", substr($aColors, 3*$i, 3));
+			$r = 255-$r;
+			$g = 255-$g;
+			$b = 255-$b;
+			substr($aColors, 3*$i, 3) = pack("CCC", $r, $g, $b);
+		}
+	}
+	if ($self->{'desaturate'})
+	{
+		warn "\tdesaturating colour table\n" if $self->{'debug'};
+		for $i (0 .. ($nColors-1))
+		{
+			my ($r, $g, $b) = unpack("CCC", substr($aColors, 3*$i, 3));
+			my $avg = ($r + $g + $b) / 3;
+			$r = $avg;
+			$g = $avg;
+			$b = $avg;
+			substr($aColors, 3*$i, 3) = pack("CCC", $r, $g, $b);
+		}
+	}
+	if ($self->{'posterize'})
+	{
+		warn "\tposterizing colour table\n" if $self->{'debug'};
+		for $i (0 .. ($nColors-1))
+		{
+			my ($r, $g, $b) = unpack("CCC", substr($aColors, 3*$i, 3));
+			#$r = ($r < 128 ? 0 : 255);
+			#$g = ($g < 128 ? 0 : 255);
+			#$b = ($b < 128 ? 0 : 255);
+			# quantise each colour (BDL)
+			my $s = 255 / $self->{'posterize'};
+			$r = int (int($r/$s + 0.5) * $s);
+			$g = int (int($g/$s + 0.5) * $s);
+			$b = int (int($b/$s + 0.5) * $s);
+			substr($aColors, 3*$i, 3) = pack("CCC", $r, $g, $b);
+		}
+	}
+
+	$aColors;
 }
 
 sub _read_header
@@ -206,10 +308,8 @@ sub _read_header
 
 	if ($flags & 0x80)	# get global color table if present
 	{
-		warn "\treading global colour table [" . 
-				sprintf ('%d', 3 * (1<<(($flags & 0x07) + 1))) . 
-				" bytes]\n" if $self->{'debug'};
-		_read($io, $self->{'header'}, 3 * (1<<(($flags & 0x07) + 1)), -1);
+		my $ctable = $self->_read_and_adjust_color_table($io, $flags);
+		$self->{'header'} .= $ctable;
 	}
 
 	return 1;
@@ -257,11 +357,8 @@ sub _read_image_descriptor
 	my ($flags) = unpack("x8 C", $b);
 	if ($flags & 0x80)	# local colour map?
 	{
-		warn "\treading local colour table [" . 
-			sprintf ("%3d", 3 * (1<<(($flags & 0x07) + 1))) . 
-			" bytes]\n" if $self->{'debug'};
-		_read($io, $self->{'parts'}[$part], 
-			3 * (1<<(($flags & 0x07) + 1)), -1);
+		my $ctable = $self->_read_and_adjust_color_table($io, $flags);
+		$self->{'parts'}[$part] .= $ctable;
 	}
 
 	# get 'LZW code size' parameter
@@ -536,12 +633,14 @@ sub print_part
 
 sub deanimate
 # print header, given part and trailer to given / default fh
+# - print a random part for indices < 0
 {
 	my ($self, $part, $io) = @_;
 
 	$io = defined($io) ? _wrap($io, 'w') : $self->{'output'};
 
 	$part ||= 0;
+	$part = int rand(@{$self->{'parts'}}) if $part < 0;
 
 	$io->print($self->{'header'});
 	$io->print($self->{'parts'}->[$part]);
@@ -561,6 +660,8 @@ sub print_parts
 	warn "printing parts $ppart - $part to $io\n" if ($self->{'debug'} > 1);
 	while ($ppart <= $part)
 	{
+		warn " $ppart (" . length($self->{'parts'}->[$ppart]) . ") bytes\n" 
+			if ($self->{'debug'} > 2);
 		$io->print($self->{'parts'}->[$ppart++]);
 	}
 	$self->{'_ppart'} = $ppart;
@@ -571,7 +672,7 @@ sub print_percent
 	my ($self, $p, $io) = @_;
 	$p = 1 if $p > 1;
 	$p = 0 if $p < 0;
-	$self->print_parts(int($p * @{$self->{'parts'}} + 0.5), $io);
+	$self->print_parts(int($p * $#{$self->{'parts'}} + 0.5), $io);
 }
 
 sub print_header
@@ -609,7 +710,10 @@ Image::ParseGIF - Parse a GIF image into its compenent parts.
 
   $gif = new Image::ParseGIF ("image.gif") or die "failed to parse: $@\n";
 
-  # show only the first frame
+  # write out a deanimated version, showing only the first frame
+  $gif->deanimate(0);
+
+  #  same again, manually printing each part
   print $gif->header;
   print $gif->part(0);
   print $gif->trailer;
@@ -720,10 +824,10 @@ There are two types of 'descriptor blocks/extensions' defined in the GIF
 specification [1]: an image descriptor; or an extension. Extensions can
 contain 'control' information for things like animated gifs. Each descriptor
 block/extension has its own 'header', often followed by one or more data
-blocks. This module extracts only image desciptors and graphic control
+blocks. This module extracts only image descriptors and graphic control
 extensions. Moreover, this module treats associated descriptor blocks and
-extensions as a 'part' - an image 'part' is considered to be all extensions
-prior to an image descriptor, plus the image descriptor.
+extensions as a 'part' - an image 'part' is considered to be the extension/s
+leading up to an image descriptor, plus the image descriptor.
 
 
 =head1 CONSTRUCTOR / CLASS METHODS
@@ -744,10 +848,38 @@ state for new output streams. On by default.
 
 =item new ( FILENAME [, {ARGUMENTS}] )
 
-Creates a new C<Image::ParseGIF> object. If FILENAME is supplied, opens and 
-parses the given file. ARGUMENTS may be: 'Debug' (natural number) to set the 
-debug level; 'Output' (IO::Handle/filehandle/glob) to set the default output 
-stream (default STDOUT).
+Creates a new C<Image::ParseGIF> object.
+
+If FILENAME is supplied, opens and parses the given file.
+
+ARGUMENTS may be:
+
+=over
+
+=item 'debug' (natural number)
+
+Set the debug level.
+
+=item 'output' (IO::Handle/filehandle/glob)
+
+Sets the default output stream (default STDOUT). (See perl's binmode() 
+regarding writing binary output.)
+
+=item 'invert' (natural number)
+
+Adjusts the colour inversion feature (default 0 is off).
+
+=item 'posterize' (natural number)
+=item 'posterise' (natural number)
+
+Adjusts the colour posterization (high pass filtering) feature (default 0 is 
+off, positive values increase the resulting gamut).
+
+=item 'desaturate' (natural number)
+
+Adjusts the colour-to-grayscale feature (default 0 is off).
+
+=back
 
 =back
 
@@ -757,8 +889,37 @@ stream (default STDOUT).
 
 =item debug ( LEVEL )
 
-Sets/gets the surrent debug level. The higher the debug level, the more 
-output.
+If LEVEL is omitted, returns the current debug level setting.
+
+If LEVEL is defined, sets the current debug level.
+The higher the debug level, the more output.
+
+=item invert ( EXPR )
+
+If EXPR is omitted, returns the current colour inversion setting.
+
+If EXPR is defined, sets the current colour inversion setting.
+Zero is off, nonzero inverts RGB colour table values,
+leaving each one as a photo-negative colour instead.
+Default is 0.
+
+=item posterize ( EXPR )
+=item posterise ( EXPR )
+
+If EXPR is omitted, returns the current colour posterization setting.
+
+If EXPR is defined (N), sets the current colour posterization setting.
+Zero is off, nonzero posterizes RGB colour table values,
+leaving each one to be one of N colors. Default is 0.
+
+=item desaturate ( EXPR )
+
+If EXPR is omitted, returns the current colour desaturization setting.
+
+If EXPR is defined, sets the current colour desaturization setting.
+Zero is off, nonzero desaturizes RGB colour table values,
+leaving each one as a mean grayscale value.
+Default is 0.
 
 =item open ( FILENAME )
 
@@ -785,7 +946,7 @@ if PART > number of parts, returns trailer.
 = item output ( IO )
 
 Specifies the default output filehandle / IO::Handle for all subsequent print_ 
-calls.
+calls. (See perl's binmode() regarding writing binary output.)
 
 =item print_(header|trailer) ( [IO] )
 
@@ -803,7 +964,8 @@ PreviousPART to PART to the supplied / default output stream.
 =item print_percent ( PERCENT [, IO ] )
 
 Prints PERCENT percent of the image frames. Remembers where it was up to, and 
-will only print increasing part numbers (i.e. it won't duplicate parts).
+will only print increasing part numbers (i.e. it won't duplicate parts). Note
+you'll still need to print the header and trailer.
 
 =item deanimate ( [PART] [, IO ] )
 
@@ -815,7 +977,7 @@ supplied / default output stream.
 
 =head1 NOTES
 
-You shpuld be able to parse an image contained in any object which has
+You should be able to parse an image contained in any object which has
 a read() method (e.g. IO::Scalar), however the object will have to support 
 the OFFSET read() argument. As at version 1.114, IO::Scalar does not.
 
@@ -831,18 +993,29 @@ For example:
 
 =item 
 
-Could probably have a simpler implementation...
-
-=item 
-
 It'd be nice to have a more generic interface to handle all GIF extensions, etc.
+
+=item
+
+And from the "In case you've ever wondered" department:
+
+Natural Number (http://mathworld.wolfram.com/NaturalNumber.html)
+
+"A positive integer 1, 2, 3, ... ([ref]). The set of natural numbers is
+denoted N or Z+. Unfortunately, 0 is sometimes also included in the
+list of ``natural'' numbers (Bourbaki 1968, Halmos 1974), and there
+seems to be no general agreement about whether to include it.  In fact,
+Ribenboim (1996) states ``Let [P] be a set of natural numbers; whenever
+convenient, it may be assumed that [0 <element of> P].''"
 
 =back
 
 =head1 COPYRIGHT
 
-Copyright (c) 1999 University of New South Wales 
+Copyright (c) 1999/2000 University of New South Wales 
 Benjamin Low <b.d.low@unsw.edu.au>. All rights reserved.
+
+Colour-table portions added 1 June 2000 Ed Halley <ed@explorati.com>.
 
 This program is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
@@ -852,9 +1025,11 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 Artistic License for more details.
 
-=head1 AUTHOR
+=head1 AUTHORS
 
 Benjamin Low <b.d.low@unsw.edu.au>
+
+Ed Halley <ed@explorati.com>
 
 =head1 SEE ALSO
 

@@ -21,5 +21,5 @@ Image-ParseGIF module.
 Deanimation Example
 --------------------
 
-Run deanim.pl across any animated gifs to extract the first frame.
+Run deanim.pl across any animated gif/s to extract a random frame of each.
 
