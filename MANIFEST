@@ -1,0 +1,8 @@
+MANIFEST
+README
+Makefile.PL
+ParseGIF.pm
+example/README
+example/main.cgi
+example/status.cgi
+example/progressbar.gif
